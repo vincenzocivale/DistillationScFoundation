@@ -1,0 +1,58 @@
+{
+  "attn_config": {
+    "attn_impl": "flash",
+    "attn_pdrop": 0.0,
+    "attn_type": "grouped_query_attention",
+    "clip_qkv": null,
+    "qk_gn": false,
+    "qk_ln": false,
+    "softmax_scale": null,
+    "use_attn_mask": false
+  },
+  "cell_emb_style": "cls",
+  "cv_encoder_activation": "relu",
+  "cv_encoder_dropout": 0.1,
+  "cv_encoder_max_value": 512,
+  "cv_encoder_use_norm": false,
+  "d_model": 128,
+  "expansion_ratio": 4,
+  "expr_decoder_activation": "leaky_relu",
+  "expr_decoder_n_layers": 2,
+  "expr_decoder_n_outputs": 1,
+  "gene_encoder_config": {
+    "padding_idx": null,
+    "use_norm": false
+  },
+  "init_config": {
+    "emb_init_std": null,
+    "emb_init_uniform_lim": null,
+    "fan_mode": "fan_in",
+    "init_div_is_residual": true,
+    "init_gain": 0.0,
+    "init_nonlinearity": "relu",
+    "init_std": null,
+    "name": "kaiming_normal_"
+  },
+  "keep_first_n_tokens": 1,
+  "max_position_embeddings": 100,
+  "model_type": "student-tx",
+  "mvc_arch_style": null,
+  "mvc_query_activation": null,
+  "mvc_scaled_dot_product": false,
+  "n_heads": 2,
+  "n_input_bins": 51,
+  "n_layers": 2,
+  "norm_config": {
+    "eps": 1e-05,
+    "norm_type": "low_precision_layernorm"
+  },
+  "norm_scheme": "pre",
+  "pad_token_id": 0,
+  "pad_value": 0,
+  "return_gene_embeddings": false,
+  "target_sum": 10000,
+  "transformer_activation": "gelu",
+  "transformers_version": "4.57.3",
+  "use_glu": false,
+  "vocab_size": 62720
+}
