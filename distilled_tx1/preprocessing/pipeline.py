@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from scipy import sparse
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from functools import partial
-from tqdm.auto import tqdm
 import warnings
+from tqdm.auto import tqdm
 
 from .vocabulary import GeneVocabulary, download_tahoe_vocab
 from .binning import ExpressionBinner, normalize_expression
@@ -31,7 +31,7 @@ class PreprocessingConfig:
     seq_len: int = 2048
     n_bins: int = 51
     mask_ratio: float = 0.0  # No masking for inference
-    normalize: bool = False
+    normalize: bool = True
     normalization_method: str = "log1p"
     target_sum: float = 1e4
     gene_sampling_strategy: str = "random"  # "random", "topk", "variance"
@@ -142,29 +142,58 @@ class TahoePreprocessor:
         batch_size = self.config.batch_size
         n_batches = (n_cells + batch_size - 1) // batch_size
         
-        all_gene_ids = []
-        all_expression_bins = []
-        all_attention_masks = []
+        # PRE-ALLOCATE final arrays (saves RAM - no intermediate lists)
+        # This avoids creating temporary lists and concatenating them
+        gene_ids_all = np.full(
+            (n_cells, self.config.seq_len),
+            self.vocab.pad_token_id,
+            dtype=np.int32
+        )
+        expression_bins_all = np.zeros(
+            (n_cells, self.config.seq_len),
+            dtype=np.int32
+        )
+        attention_masks_all = np.zeros(
+            (n_cells, self.config.seq_len),
+            dtype=np.int32
+        )
         
-        batch_iter = range(n_batches)
-        if verbose:
-            batch_iter = tqdm(batch_iter, desc="Processing batches", unit="batch")
-        for batch_idx in batch_iter:
+        # Create progress bar
+        pbar = tqdm(
+            range(n_batches), 
+            desc="Tokenizing cells",
+            disable=not verbose,
+            unit="batch"
+        )
+        
+        for batch_idx in pbar:
             start_idx = batch_idx * batch_size
             end_idx = min(start_idx + batch_size, n_cells)
+            
             X_batch = X_binned[start_idx:end_idx]
+            
             # Vectorized sequence creation
             batch_result = self._create_sequences_vectorized(
                 X_batch, gene_tokens, gene_ids
             )
-            all_gene_ids.append(batch_result["gene_ids"])
-            all_expression_bins.append(batch_result["expression_bins"])
-            all_attention_masks.append(batch_result["attention_mask"])
+            
+            # Write directly to pre-allocated arrays (no copying/concatenating)
+            gene_ids_all[start_idx:end_idx] = batch_result["gene_ids"]
+            expression_bins_all[start_idx:end_idx] = batch_result["expression_bins"]
+            attention_masks_all[start_idx:end_idx] = batch_result["attention_mask"]
+            
+            # Update progress bar with detailed info
+            pbar.set_postfix({
+                'cells': f'{end_idx:,}/{n_cells:,}',
+                'batch_size': end_idx - start_idx
+            })
+            
+            # Free batch memory immediately
+            del X_batch, batch_result
         
-        # Concatenate batches
-        gene_ids_all = np.concatenate(all_gene_ids, axis=0)
-        expression_bins_all = np.concatenate(all_expression_bins, axis=0)
-        attention_masks_all = np.concatenate(all_attention_masks, axis=0)
+        pbar.close()
+        
+        # No concatenation needed - arrays are already filled!
         
         if return_dict:
             return {
@@ -392,9 +421,19 @@ class TahoePreprocessor:
             end_idx = min(i + chunk_size, n_cells)
             chunks.append((X_binned[i:end_idx], i))
         
-        # Process in parallel
+        # Process in parallel with progress bar
+        if verbose:
+            print(f"Processing {len(chunks)} chunks with {n_workers} workers...")
+        
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
-            results = list(executor.map(process_chunk, chunks))
+            # Use tqdm to track parallel execution
+            results = list(tqdm(
+                executor.map(process_chunk, chunks),
+                total=len(chunks),
+                desc="Parallel processing",
+                disable=not verbose,
+                unit="chunk"
+            ))
         
         # Concatenate results
         gene_ids_all = np.concatenate([r["gene_ids"] for r in results], axis=0)
@@ -476,3 +515,212 @@ class TahoePreprocessor:
             preprocessor._binner_fitted = True
         
         return preprocessor
+    
+    def process_adata_to_disk(
+        self,
+        adata: AnnData,
+        output_path: Union[str, Path],
+        verbose: bool = True
+    ) -> Path:
+        """
+        Process AnnData and save directly to disk (for VERY large datasets).
+        
+        This uses memory-mapped files to avoid loading everything into RAM.
+        Ideal for datasets > 5M cells or when RAM is very limited.
+        
+        Args:
+            adata: Input AnnData object
+            output_path: Path to save numpy memmap files
+            verbose: Print progress information
+            
+        Returns:
+            Path to output directory containing memmap files
+        """
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Step 1-4: Same preprocessing
+        matched_adata = self._match_genes(adata, verbose=verbose)
+        
+        if self.config.normalize:
+            X_norm = normalize_expression(
+                matched_adata.X,
+                method=self.config.normalization_method,
+                target_sum=self.config.target_sum
+            )
+        else:
+            X_norm = matched_adata.X
+        
+        if not self._binner_fitted:
+            self.binner.fit(X_norm)
+            self._binner_fitted = True
+        
+        X_binned = self.binner.transform(X_norm)
+        
+        # Step 5: Create memory-mapped arrays on disk
+        n_cells = X_binned.shape[0]
+        
+        if verbose:
+            print(f"Creating memory-mapped files for {n_cells:,} cells...")
+        
+        # Create memory-mapped files
+        gene_ids_mmap = np.memmap(
+            output_path / "gene_ids.npy",
+            dtype=np.int32,
+            mode='w+',
+            shape=(n_cells, self.config.seq_len)
+        )
+        gene_ids_mmap[:] = self.vocab.pad_token_id
+        
+        expression_bins_mmap = np.memmap(
+            output_path / "expression_bins.npy",
+            dtype=np.int32,
+            mode='w+',
+            shape=(n_cells, self.config.seq_len)
+        )
+        
+        attention_mask_mmap = np.memmap(
+            output_path / "attention_mask.npy",
+            dtype=np.int32,
+            mode='w+',
+            shape=(n_cells, self.config.seq_len)
+        )
+        
+        # Pre-encode genes
+        gene_ids = matched_adata.var_names.tolist()
+        gene_tokens = np.array(self.vocab.encode(gene_ids), dtype=np.int32)
+        
+        # Process in batches and write directly to disk
+        batch_size = self.config.batch_size
+        n_batches = (n_cells + batch_size - 1) // batch_size
+        
+        pbar = tqdm(
+            range(n_batches),
+            desc="Writing to disk",
+            disable=not verbose,
+            unit="batch"
+        )
+        
+        for batch_idx in pbar:
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, n_cells)
+            
+            X_batch = X_binned[start_idx:end_idx]
+            
+            # Process batch
+            batch_result = self._create_sequences_vectorized(
+                X_batch, gene_tokens, gene_ids
+            )
+            
+            # Write directly to memory-mapped files (stays on disk)
+            gene_ids_mmap[start_idx:end_idx] = batch_result["gene_ids"]
+            expression_bins_mmap[start_idx:end_idx] = batch_result["expression_bins"]
+            attention_mask_mmap[start_idx:end_idx] = batch_result["attention_mask"]
+            
+            # Flush to disk periodically
+            if batch_idx % 10 == 0:
+                gene_ids_mmap.flush()
+                expression_bins_mmap.flush()
+                attention_mask_mmap.flush()
+            
+            pbar.set_postfix({
+                'cells': f'{end_idx:,}/{n_cells:,}',
+                'disk_usage': f'{self._get_dir_size(output_path):.1f} MB'
+            })
+            
+            del X_batch, batch_result
+        
+        pbar.close()
+        
+        # Final flush
+        gene_ids_mmap.flush()
+        expression_bins_mmap.flush()
+        attention_mask_mmap.flush()
+        
+        # Save metadata
+        metadata = {
+            "n_cells": n_cells,
+            "seq_len": self.config.seq_len,
+            "shape": [n_cells, self.config.seq_len],
+            "dtype": "int32"
+        }
+        
+        import json
+        with open(output_path / "metadata.json", 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        if verbose:
+            total_size = self._get_dir_size(output_path)
+            print(f"\n✅ Saved to disk: {output_path}")
+            print(f"   Total size: {total_size:.1f} MB")
+            print(f"   Files: gene_ids.npy, expression_bins.npy, attention_mask.npy")
+        
+        return output_path
+    
+    def load_from_disk(
+        self,
+        input_path: Union[str, Path],
+        return_torch: bool = True
+    ) -> Dict[str, Union[np.ndarray, torch.Tensor]]:
+        """
+        Load preprocessed data from disk (memory-mapped).
+        
+        Args:
+            input_path: Path to directory with memmap files
+            return_torch: If True, return torch tensors; else numpy arrays
+            
+        Returns:
+            Dictionary with gene_ids, expression_bins, attention_mask
+        """
+        input_path = Path(input_path)
+        
+        # Load metadata
+        import json
+        with open(input_path / "metadata.json", 'r') as f:
+            metadata = json.load(f)
+        
+        shape = tuple(metadata["shape"])
+        
+        # Load memory-mapped arrays (doesn't load into RAM)
+        gene_ids = np.memmap(
+            input_path / "gene_ids.npy",
+            dtype=np.int32,
+            mode='r',
+            shape=shape
+        )
+        
+        expression_bins = np.memmap(
+            input_path / "expression_bins.npy",
+            dtype=np.int32,
+            mode='r',
+            shape=shape
+        )
+        
+        attention_mask = np.memmap(
+            input_path / "attention_mask.npy",
+            dtype=np.int32,
+            mode='r',
+            shape=shape
+        )
+        
+        if return_torch:
+            # PyTorch can work with memory-mapped arrays directly
+            return {
+                "gene_ids": torch.from_numpy(gene_ids).long(),
+                "expression_bins": torch.from_numpy(expression_bins).long(),
+                "attention_mask": torch.from_numpy(attention_mask).long()
+            }
+        else:
+            return {
+                "gene_ids": gene_ids,
+                "expression_bins": expression_bins,
+                "attention_mask": attention_mask
+            }
+    
+    @staticmethod
+    def _get_dir_size(path: Path) -> float:
+        """Get directory size in MB"""
+        total = 0
+        for file in path.glob("*.npy"):
+            total += file.stat().st_size
+        return total / (1024 * 1024)  # Convert to MB
