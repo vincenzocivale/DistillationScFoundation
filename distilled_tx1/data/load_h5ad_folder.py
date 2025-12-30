@@ -23,6 +23,6 @@ def load_h5ad_folder_lazy(folder_path: str, backed: bool = True, filename_filter
         raise FileNotFoundError(f"Nessun file .h5ad trovato in {folder_path}")
 
     # Carica in modalità backed e concatena
-    adatas = [sc.read_h5ad(f, backed='r' if backed else None) for f in files]
+    adatas = [sc.read_h5ad(f) for f in files]
     adata_concat = sc.concat(adatas, join='outer', axis=0, index_unique=None)
     return adata_concat

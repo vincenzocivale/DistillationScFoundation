@@ -63,79 +63,43 @@ class DistillationDataset(Dataset):
 
 class DistillationLoss(nn.Module):
     """
-    Combined loss for knowledge distillation.
-    
-    Combines:
-    - MSE loss between student and teacher embeddings
-    - Optional classification loss (if labels provided)
-    - Optional cosine similarity loss
+    Distillation loss for normalized teacher embeddings.
+
+    - Cosine loss = loss principale
+    - MSE = regolarizzazione opzionale
     """
-    
+
     def __init__(
         self,
-        embedding_loss_weight: float = 1.0,
-        classification_loss_weight: float = 0.0,
-        cosine_loss_weight: float = 0.0,
-        temperature: float = 1.0
+        cosine_loss_weight: float = 1.0,
+        mse_loss_weight: float = 0.0
     ):
         super().__init__()
-        self.embedding_loss_weight = embedding_loss_weight
-        self.classification_loss_weight = classification_loss_weight
         self.cosine_loss_weight = cosine_loss_weight
-        self.temperature = temperature
-        
+        self.mse_loss_weight = mse_loss_weight
         self.mse_loss = nn.MSELoss()
-        self.cosine_loss = nn.CosineEmbeddingLoss()
-    
+
     def forward(
         self,
         student_embeddings: torch.Tensor,
-        teacher_embeddings: torch.Tensor,
-        student_logits: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute distillation loss.
-        
-        Args:
-            student_embeddings: Student model embeddings
-            teacher_embeddings: Teacher model embeddings
-            student_logits: Optional classification logits
-            labels: Optional ground truth labels
-        
-        Returns:
-            total_loss: Combined loss
-            loss_dict: Dictionary of individual loss components
-        """
+        teacher_embeddings: torch.Tensor
+    ):
         loss_dict = {}
-        
-        # Embedding MSE loss
-        embedding_loss = self.mse_loss(student_embeddings, teacher_embeddings)
-        loss_dict["embedding_loss"] = embedding_loss.item()
-        
-        total_loss = self.embedding_loss_weight * embedding_loss
-        
-        # Cosine similarity loss
-        if self.cosine_loss_weight > 0:
-            # Maximize cosine similarity (minimize negative cosine)
-            target = torch.ones(student_embeddings.size(0), device=student_embeddings.device)
-            cosine_loss = self.cosine_loss(
-                student_embeddings,
-                teacher_embeddings,
-                target
-            )
-            loss_dict["cosine_loss"] = cosine_loss.item()
-            total_loss = total_loss + self.cosine_loss_weight * cosine_loss
-        
-        # Classification loss (optional)
-        if self.classification_loss_weight > 0 and student_logits is not None and labels is not None:
-            ce_loss = F.cross_entropy(student_logits, labels)
-            loss_dict["classification_loss"] = ce_loss.item()
-            total_loss = total_loss + self.classification_loss_weight * ce_loss
-        
+
+        student_norm = F.normalize(student_embeddings, dim=-1)
+        teacher_norm = F.normalize(teacher_embeddings, dim=-1)
+
+        cosine_sim = F.cosine_similarity(student_norm, teacher_norm, dim=-1)
+        cosine_loss = 1.0 - cosine_sim.mean()
+        loss_dict["cosine_loss"] = cosine_loss.item()
+        loss_dict["cosine_sim"] = cosine_sim.mean().item()
+
+        total_loss = self.cosine_loss_weight * cosine_loss
+
+
         loss_dict["total_loss"] = total_loss.item()
-        
         return total_loss, loss_dict
+
 
 
 def train_distilled_model(
