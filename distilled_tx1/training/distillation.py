@@ -96,8 +96,6 @@ class DistillationLoss(nn.Module):
 
         total_loss = self.cosine_loss_weight * cosine_loss
 
-
-        loss_dict["total_loss"] = total_loss.item()
         return total_loss, loss_dict
 
 
@@ -243,6 +241,12 @@ def train_distilled_model(
     # Initialize loss
     criterion = DistillationLoss(**loss_kwargs)
     
+    # Initial evaluation
+    initial_similarity = evaluate_cosine_similarity(model, eval_loader, device)
+    print(f"Initial Cosine Similarity: {initial_similarity:.4f}")
+    if use_wandb:
+        wandb.log({"eval/initial_cosine_similarity": initial_similarity}, step=0)
+
     # Training loop
     global_step = 0
     best_eval_loss = float('inf')
