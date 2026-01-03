@@ -190,12 +190,14 @@ def train_distilled_model(
     """
     # Initialize W&B
     if use_wandb:
-        wandb.init(project=wandb_project, config={
+        wandb_config = {
             "num_epochs": num_epochs,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
-            **loss_kwargs
-        })
+            **loss_kwargs,
+        }
+        wandb_config.update(config.__dict__)
+        wandb.init(project=wandb_project, config=wandb_config)
     
     # Create output directory
     output_dir = Path(output_dir)
@@ -306,10 +308,7 @@ def train_distilled_model(
                 return_dict=True
             )
             
-            student_emb = model._pool_output(
-                outputs.last_hidden_state,
-                attention_mask_batch
-            )
+            student_emb = outputs.pooler_output
             
             # Compute loss
             loss, loss_dict = criterion(
@@ -359,10 +358,7 @@ def train_distilled_model(
                     return_dict=True
                 )
                 
-                student_emb = model._pool_output(
-                    outputs.last_hidden_state,
-                    attention_mask_batch
-                )
+                student_emb = outputs.pooler_output
                 
                 loss, loss_dict = criterion(
                     student_embeddings=student_emb,

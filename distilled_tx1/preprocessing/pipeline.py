@@ -91,6 +91,44 @@ class TahoePreprocessor:
         # Pre-compute gene token mappings for faster encoding
         self._gene_token_cache = {}
     
+    def __init__(
+        self,
+        vocab: Optional[GeneVocabulary] = None,
+        vocab_path: Optional[Union[str, Path]] = None,
+        config: Optional[PreprocessingConfig] = None,
+        tahoe_model_size: str = "70m"
+    ):
+        """
+        Initialize preprocessor.
+        
+        Args:
+            vocab: Gene vocabulary (if None, will load from vocab_path or download)
+            vocab_path: Path to vocabulary JSON file
+            config: Preprocessing configuration
+            tahoe_model_size: Tahoe model size for auto-downloading vocab ("70m", "1b", "3b")
+        """
+        self.config = config or PreprocessingConfig()
+        
+        # Load vocabulary
+        if vocab is not None:
+            self.vocab = vocab
+        elif vocab_path is not None:
+            self.vocab = GeneVocabulary.from_json(vocab_path)
+        else:
+            # Download Tahoe vocab
+            vocab_path = download_tahoe_vocab(tahoe_model_size)
+            self.vocab = GeneVocabulary.from_json(vocab_path)
+        
+        # Initialize expression binner
+        self.binner = ExpressionBinner(
+            n_bins=self.config.n_bins,
+            strategy="log"
+        )
+        self._binner_fitted = False
+        
+        # Pre-compute gene token mappings for faster encoding
+        self._gene_token_cache = {}
+    
     def process_adata(
         self,
         adata: AnnData,

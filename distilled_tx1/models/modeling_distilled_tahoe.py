@@ -8,7 +8,7 @@ Fully compatible with HuggingFace transformers library.
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
-from transformers.modeling_outputs import BaseModelOutput
+from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from typing import Optional, Tuple, Union
 import math
 
@@ -418,8 +418,9 @@ class DistilledTahoeModel(PreTrainedModel):
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
         
-        return BaseModelOutput(
+        return BaseModelOutputWithPooling(
             last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
         )
@@ -482,7 +483,7 @@ class DistilledTahoeModel(PreTrainedModel):
             return_dict=True
         )
         
-        return self._pool_output(outputs.last_hidden_state, attention_mask)
+        return outputs.pooler_output
 
 
 # Register the model for AutoModel

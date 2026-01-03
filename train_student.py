@@ -84,26 +84,29 @@ student_config = DistilledTahoeConfig(
     )
 
 # %%
-model = train_distilled_model(
-        gene_ids=gene_ids,
-        expression_bins=expression_bins,
-        attention_masks=attention_masks,
-        teacher_embeddings=teacher_embeddings,
-        labels=None,  # Optional: add classification labels
-        config=student_config,
-        output_dir="./model_outputs/distilled_tahoe",
-        num_epochs=5,
-        batch_size=64,  # Adjust based on GPU memory
-        learning_rate=5e-3,
-        warmup_steps=1000,
-        weight_decay=0.01,
-        max_grad_norm=1.0,
-        logging_steps=100,
-        save_steps=5000,
-        eval_split=0.1,
-        use_wandb=True,  # Optional: log to W&B
-        wandb_project="distilled-tahoe-x1",
-    )
+try:
+    model = train_distilled_model(
+            gene_ids=gene_ids,
+            expression_bins=expression_bins,
+            attention_masks=attention_masks,
+            teacher_embeddings=teacher_embeddings,
+            labels=None,  # Optional: add classification labels
+            config=student_config,
+            output_dir="./model_outputs/distilled_tahoe",
+            num_epochs=5,
+            batch_size=64,  # Adjust based on GPU memory
+            learning_rate=5e-3,
+            warmup_steps=1000,
+            weight_decay=0.01,
+            max_grad_norm=1.0,
+            logging_steps=100,
+            save_steps=5000,
+            eval_split=0.1,
+            use_wandb=True,  # Optional: log to W&B
+            wandb_project="distilled-tahoe-x1",
+        )
+except Exception as e:
+    print(e)
     
 
 
