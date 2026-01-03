@@ -4,6 +4,7 @@ import scanpy as sc
 from pathlib import Path
 import torch
 from tqdm.auto import tqdm
+import os
 
 from distilled_tx1.preprocessing.pipeline import TahoePreprocessor, PreprocessingConfig
 from distilled_tx1.models.modeling_distilled_tahoe import DistilledTahoeModel, DistilledTahoeConfig
@@ -11,7 +12,7 @@ from distilled_tx1.training.distillation import train_distilled_model
 from distilled_tx1.data.load_h5ad_folder import load_h5ad_folder_lazy
 
 # %%
-ref_adata = sc.read_h5ad("data_yuto_with_clusters_chunk_001.h5ad")
+ref_adata = sc.read_h5ad("70m/data_yuto_with_clusters_chunk_001.h5ad")
 
 # %%
 
@@ -43,7 +44,8 @@ attention_masks = np.array([])
 # %%
 for h5ad_file in tqdm(Path("70m").glob("*.h5ad")):
     adata = sc.read_h5ad(h5ad_file)
-    adata.var['gene_id'] = ref_adata.var['gene_id']
+
+    adata.var['gene_id'] = ref_adata.var['gene_id'].astype(str)
     
     processed = preprocessor.process_adata(adata, return_dict=True)
 
@@ -93,8 +95,8 @@ try:
             labels=None,  # Optional: add classification labels
             config=student_config,
             output_dir="./model_outputs/distilled_tahoe",
-            num_epochs=5,
-            batch_size=64,  # Adjust based on GPU memory
+            num_epochs=20,
+            batch_size=8,  # Adjust based on GPU memory
             learning_rate=5e-3,
             warmup_steps=1000,
             weight_decay=0.01,
