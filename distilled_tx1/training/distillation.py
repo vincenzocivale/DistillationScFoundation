@@ -343,6 +343,7 @@ def train_distilled_model(
         # Evaluation
         model.eval()
         eval_losses = []
+        eval_cosine_sims = []
         
         with torch.no_grad():
             for batch in tqdm(eval_loader, desc="Evaluating"):
@@ -366,17 +367,24 @@ def train_distilled_model(
                 )
                 
                 eval_losses.append(loss.item())
-        
+
+                # Calculate cosine similarity
+                sim = F.cosine_similarity(student_emb, teacher_emb_batch, dim=-1)
+                eval_cosine_sims.extend(sim.cpu().numpy())
+
         avg_train_loss = np.mean(train_losses)
         avg_eval_loss = np.mean(eval_losses)
+        avg_eval_cosine_sim = np.mean(eval_cosine_sims)
         
         print(f"Train Loss: {avg_train_loss:.4f}")
         print(f"Eval Loss: {avg_eval_loss:.4f}")
+        print(f"Eval Cosine Similarity: {avg_eval_cosine_sim:.4f}")
         
         if use_wandb:
             wandb.log({
                 "train/epoch_loss": avg_train_loss,
                 "eval/epoch_loss": avg_eval_loss,
+                "eval/cosine_similarity": avg_eval_cosine_sim,
                 "epoch": epoch
             }, step=global_step)
         
