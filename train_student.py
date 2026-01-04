@@ -14,8 +14,8 @@ from distilled_tx1.training.distillation import train_distilled_model, Distillat
 
 # %%
 # --- Configuration ---
-DATA_DIR = Path("/data/scClassificationDatasets/data_yuto/tahoe_x1_embeddings/70m")
-REF_ADATA_PATH = "70m/data_yuto_with_clusters_chunk_001.h5ad"
+DATA_DIR = Path("/data2/home/vcivale/DistillationScFoundation/70m")
+REF_ADATA_PATH = "/data2/home/vcivale/DistillationScFoundation/70m/data_yuto_with_clusters_chunk_001.h5ad"
 VOCAB_PATH = "vocab.json"
 OUTPUT_DIR = "./model_outputs/distilled_tahoe_optimized"
 WANDB_PROJECT = "distilled-tahoe-x1-optimized"
@@ -45,18 +45,12 @@ student_config = DistilledTahoeConfig(
     pooling_strategy="cls"
 )
 
-# Enable Flash Attention 2 if available for an extra speed boost
-if torch.cuda.is_available() and is_flash_attn_2_available():
-    print("Flash Attention 2 detected, enabling for training.")
-    student_config.attn_implementation = "flash_attention_2"
-else:
-    print("Flash Attention 2 not available, using standard attention.")
-    student_config.attn_implementation = "eager"
+
 
 # --- Training Hyperparameters ---
 training_args = {
     "num_epochs": 25,
-    "batch_size": 16, # Can be larger with AMP
+    "batch_size": 32, # Can be larger with AMP
     "learning_rate": 5e-4,
     "warmup_steps": 500,
     "weight_decay": 0.01,

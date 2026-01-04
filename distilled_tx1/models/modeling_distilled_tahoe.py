@@ -127,12 +127,14 @@ class MultiHeadSelfAttention(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.output_dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.config = config
     
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        """Reshape for multi-head attention"""
         new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(new_shape)
+        x = x.reshape(new_shape)  # <--- changed from view to reshape
         return x.permute(0, 2, 1, 3)
+
     
     def forward(
         self,
@@ -183,8 +185,9 @@ class MultiHeadSelfAttention(nn.Module):
             
             # Apply attention mask
             if attention_mask is not None:
-                # Convert 0/1 mask to -inf/0 mask
-                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (bs, 1, 1, seq_len)
+                attention_mask = attention_mask.to(dtype=attention_scores.dtype)  # ensure dtype
+
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (bs,1,1,seq_len)
                 attention_mask = (1.0 - attention_mask) * torch.finfo(attention_scores.dtype).min
                 attention_scores = attention_scores + attention_mask
             
