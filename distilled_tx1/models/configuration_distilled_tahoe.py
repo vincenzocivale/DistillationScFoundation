@@ -52,6 +52,7 @@ class DistilledTahoeConfig(PretrainedConfig):
         cls_token_id: int = 2,
         sep_token_id: int = 3,
         mask_token_id: int = 1,
+        attn_implementation: str = "eager",
         **kwargs
     ):
         super().__init__(
@@ -75,6 +76,7 @@ class DistilledTahoeConfig(PretrainedConfig):
         self.cls_token_id = cls_token_id
         self.sep_token_id = sep_token_id
         self.mask_token_id = mask_token_id
+        self.attn_implementation = attn_implementation
     
     @property
     def attention_head_size(self):

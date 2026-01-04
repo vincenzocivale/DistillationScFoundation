@@ -11,6 +11,7 @@ from transformers import PreTrainedModel
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from typing import Optional, Tuple, Union
 import math
+from transformers.utils import is_flash_attn_2_available
 
 from .configuration_distilled_tahoe import DistilledTahoeConfig
 
@@ -151,28 +152,49 @@ class MultiHeadSelfAttention(nn.Module):
         """
         batch_size, seq_length, _ = hidden_states.shape
         
+        # Check for flash attention
+        is_flash = self.config.attn_implementation == "flash_attention_2"
+        if is_flash and not is_flash_attn_2_available():
+            raise ValueError(
+                "Flash Attention 2 requested but not available. "
+                "Please see https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html"
+            )
+
         # Project to Q, K, V
         query_layer = self.transpose_for_scores(self.query(hidden_states))
         key_layer = self.transpose_for_scores(self.key(hidden_states))
         value_layer = self.transpose_for_scores(self.value(hidden_states))
-        
-        # Compute attention scores
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        
-        # Apply attention mask
-        if attention_mask is not None:
-            # Convert 0/1 mask to -inf/0 mask
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (bs, 1, 1, seq_len)
-            attention_mask = (1.0 - attention_mask) * torch.finfo(attention_scores.dtype).min
-            attention_scores = attention_scores + attention_mask
-        
-        # Normalize to probabilities
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-        attention_probs = self.dropout(attention_probs)
-        
-        # Apply attention to values
-        context_layer = torch.matmul(attention_probs, value_layer)
+
+        if is_flash:
+            # Use Flash Attention 2.0
+            context_layer = nn.functional.scaled_dot_product_attention(
+                query_layer, 
+                key_layer, 
+                value_layer,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=False  # Assuming no causal masking needed
+            )
+            attention_probs = None # Not returned by flash attention
+
+        else:
+            # Original eager attention
+            attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+            attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+            
+            # Apply attention mask
+            if attention_mask is not None:
+                # Convert 0/1 mask to -inf/0 mask
+                attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (bs, 1, 1, seq_len)
+                attention_mask = (1.0 - attention_mask) * torch.finfo(attention_scores.dtype).min
+                attention_scores = attention_scores + attention_mask
+            
+            # Normalize to probabilities
+            attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+            attention_probs = self.dropout(attention_probs)
+            
+            # Apply attention to values
+            context_layer = torch.matmul(attention_probs, value_layer)
+
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_shape)

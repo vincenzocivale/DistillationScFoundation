@@ -7,13 +7,15 @@ Train a student encoder to match Tahoe X1 teacher embeddings.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
+from torch.cuda.amp import GradScaler, autocast
 from transformers import get_linear_schedule_with_warmup
 from typing import Dict, Optional, Tuple
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 import wandb
+import pkg_resources
 
 from ..models.modeling_distilled_tahoe import DistilledTahoeModel, DistilledTahoeConfig
 from ..preprocessing import TahoePreprocessor
@@ -139,12 +141,8 @@ class DistillationLoss(nn.Module):
 
 
 def train_distilled_model(
-    gene_ids: np.ndarray,
-    expression_bins: np.ndarray,
-    attention_masks: np.ndarray,
-    teacher_embeddings: np.ndarray,
-    labels: Optional[np.ndarray] = None,
-    config: Optional[DistilledTahoeConfig] = None,
+    full_dataset: DistillationDataset,
+    config: DistilledTahoeConfig,
     output_dir: str = "./distilled_model",
     num_epochs: int = 10,
     batch_size: int = 32,
@@ -158,45 +156,44 @@ def train_distilled_model(
     use_wandb: bool = False,
     wandb_project: str = "distilled-tahoe",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    num_workers: int = 4,
     **loss_kwargs
 ) -> DistilledTahoeModel:
     """
-    Train a distilled Tahoe encoder.
+    Train a distilled Tahoe encoder with optimizations.
     
     Args:
-        gene_ids: Tokenized gene IDs (n_cells, seq_len)
-        expression_bins: Expression bins (n_cells, seq_len)
-        attention_masks: Attention masks (n_cells, seq_len)
-        teacher_embeddings: Pre-computed teacher embeddings (n_cells, embedding_dim)
-        labels: Optional classification labels
-        config: Model configuration
-        output_dir: Directory to save model checkpoints
-        num_epochs: Number of training epochs
-        batch_size: Training batch size
-        learning_rate: Learning rate
-        warmup_steps: Number of warmup steps
-        weight_decay: Weight decay
-        max_grad_norm: Max gradient norm for clipping
-        logging_steps: Log every N steps
-        save_steps: Save checkpoint every N steps
-        eval_split: Fraction of data for validation
-        use_wandb: Whether to log to Weights & Biases
-        wandb_project: W&B project name
-        device: Device to train on
-        **loss_kwargs: Additional arguments for DistillationLoss
+        full_dataset: The complete DistillationDataset.
+        config: Model configuration.
+        output_dir: Directory to save model checkpoints.
+        num_epochs: Number of training epochs.
+        batch_size: Training batch size.
+        learning_rate: AdamW learning rate.
+        warmup_steps: Linear warmup steps.
+        weight_decay: Weight decay for AdamW.
+        max_grad_norm: Gradient clipping threshold.
+        logging_steps: Log every N steps.
+        save_steps: Save checkpoint every N steps.
+        eval_split: Fraction of data for validation.
+        use_wandb: Log to Weights & Biases.
+        wandb_project: W&B project name.
+        device: "cuda" or "cpu".
+        num_workers: Number of workers for DataLoader.
+        **loss_kwargs: Arguments for DistillationLoss.
     
     Returns:
-        Trained DistilledTahoeModel
+        The trained and optimized DistilledTahoeModel.
     """
+    use_amp = device == "cuda"
+    
     # Initialize W&B
     if use_wandb:
         wandb_config = {
-            "num_epochs": num_epochs,
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
+            "num_epochs": num_epochs, "batch_size": batch_size, "learning_rate": learning_rate,
+            "torch_version": torch.__version__, "attn_implementation": config.attn_implementation,
             **loss_kwargs,
         }
-        wandb_config.update(config.__dict__)
+        wandb_config.update(config.to_dict())
         wandb.init(project=wandb_project, config=wandb_config)
     
     # Create output directory
@@ -204,83 +201,41 @@ def train_distilled_model(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Split data
-    n_samples = len(gene_ids)
+    n_samples = len(full_dataset)
     n_eval = int(n_samples * eval_split)
-    indices = np.random.permutation(n_samples)
-    
-    train_indices = indices[n_eval:]
-    eval_indices = indices[:n_eval]
-    
-    # Create datasets
-    train_dataset = DistillationDataset(
-        gene_ids[train_indices],
-        expression_bins[train_indices],
-        attention_masks[train_indices],
-        teacher_embeddings[train_indices],
-        labels[train_indices] if labels is not None else None
-    )
-    
-    eval_dataset = DistillationDataset(
-        gene_ids[eval_indices],
-        expression_bins[eval_indices],
-        attention_masks[eval_indices],
-        teacher_embeddings[eval_indices],
-        labels[eval_indices] if labels is not None else None
-    )
+    n_train = n_samples - n_eval
+    train_dataset, eval_dataset = random_split(full_dataset, [n_train, n_eval])
     
     # Create dataloaders
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
     )
-    
     eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
+        eval_dataset, batch_size=batch_size * 2, shuffle=False,  # Larger batch for eval
+        num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0
     )
     
     # Initialize model
-    if config is None:
-        # Infer config from data
-        vocab_size = int(gene_ids.max()) + 1
-        n_bins = int(expression_bins.max()) + 1
-        embedding_dim = teacher_embeddings.shape[1]
-        
-        config = DistilledTahoeConfig(
-            vocab_size=vocab_size,
-            n_bins=n_bins,
-            hidden_size=embedding_dim,
-            num_hidden_layers=6,
-            num_attention_heads=8,
-            intermediate_size=embedding_dim * 4
-        )
+    model = DistilledTahoeModel(config).to(device)
     
-    model = DistilledTahoeModel(config)
-    model.to(device)
+    # OPTIMIZATION: torch.compile() for PyTorch 2.x
+    torch_version = pkg_resources.get_distribution("torch").version
+    if torch_version.startswith("2.") and device == "cuda":
+        print(f"PyTorch {torch_version} detected, compiling model...")
+        model = torch.compile(model)
+        if use_wandb: wandb.config.update({"torch_compile": True})
     
     # Initialize optimizer and scheduler
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=learning_rate,
-        weight_decay=weight_decay
-    )
-    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     total_steps = len(train_loader) * num_epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
-    )
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
     
-    # Initialize loss
+    # Initialize loss and AMP GradScaler
     criterion = DistillationLoss(**loss_kwargs)
-    
+    scaler = GradScaler(enabled=use_amp)
+    if use_wandb: wandb.config.update({"use_amp": use_amp})
+
     # Training loop
     global_step = 0
     best_eval_loss = float('inf')
@@ -294,108 +249,96 @@ def train_distilled_model(
         
         pbar = tqdm(train_loader, desc="Training")
         for batch in pbar:
-            # Move to device
-            gene_ids_batch = batch["gene_ids"].to(device)
-            expression_bins_batch = batch["expression_bins"].to(device)
-            attention_mask_batch = batch["attention_mask"].to(device)
-            teacher_emb_batch = batch["teacher_embeddings"].to(device)
+            # Move batch to device
+            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
-            # Forward pass
-            outputs = model(
-                gene_ids=gene_ids_batch,
-                expression_bins=expression_bins_batch,
-                attention_mask=attention_mask_batch,
-                return_dict=True
-            )
+            # OPTIMIZATION: Automatic Mixed Precision (AMP)
+            with autocast(enabled=use_amp):
+                outputs = model(
+                    gene_ids=batch["gene_ids"],
+                    expression_bins=batch["expression_bins"],
+                    attention_mask=batch["attention_mask"],
+                    return_dict=True
+                )
+                student_emb = outputs.pooler_output
+                loss, loss_dict = criterion(
+                    student_embeddings=student_emb,
+                    teacher_embeddings=batch["teacher_embeddings"]
+                )
             
-            student_emb = outputs.pooler_output
-            
-            # Compute loss
-            loss, loss_dict = criterion(
-                student_embeddings=student_emb,
-                teacher_embeddings=teacher_emb_batch
-            )
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
+            # Backward pass with GradScaler
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer) # Unscale gradients for clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True) # More efficient
             scheduler.step()
             
             # Logging
             train_losses.append(loss.item())
             global_step += 1
-            
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
             
-            if global_step % logging_steps == 0:
-                if use_wandb:
-                    wandb.log({
-                        f"train/{k}": v for k, v in loss_dict.items()
-                    }, step=global_step)
+            if global_step % logging_steps == 0 and use_wandb:
+                wandb.log({f"train/{k}": v for k, v in loss_dict.items()}, step=global_step)
             
             if global_step % save_steps == 0:
                 checkpoint_dir = output_dir / f"checkpoint-{global_step}"
-                model.save_pretrained(checkpoint_dir)
+                # Handle compiled model saving
+                save_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+                save_model.save_pretrained(checkpoint_dir)
                 print(f"\nSaved checkpoint to {checkpoint_dir}")
         
         # Evaluation
         model.eval()
-        eval_losses = []
-        eval_cosine_sims = []
+        eval_losses, eval_cosine_sims = [], []
         
         with torch.no_grad():
             for batch in tqdm(eval_loader, desc="Evaluating"):
-                gene_ids_batch = batch["gene_ids"].to(device)
-                expression_bins_batch = batch["expression_bins"].to(device)
-                attention_mask_batch = batch["attention_mask"].to(device)
-                teacher_emb_batch = batch["teacher_embeddings"].to(device)
+                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
                 
-                outputs = model(
-                    gene_ids=gene_ids_batch,
-                    expression_bins=expression_bins_batch,
-                    attention_mask=attention_mask_batch,
-                    return_dict=True
-                )
-                
-                student_emb = outputs.pooler_output
-                
-                loss, loss_dict = criterion(
-                    student_embeddings=student_emb,
-                    teacher_embeddings=teacher_emb_batch
-                )
+                # AMP for evaluation
+                with autocast(enabled=use_amp):
+                    outputs = model(
+                        gene_ids=batch["gene_ids"],
+                        expression_bins=batch["expression_bins"],
+                        attention_mask=batch["attention_mask"],
+                        return_dict=True
+                    )
+                    student_emb = outputs.pooler_output
+                    loss, loss_dict = criterion(
+                        student_embeddings=student_emb,
+                        teacher_embeddings=batch["teacher_embeddings"]
+                    )
                 
                 eval_losses.append(loss.item())
-
-                # Calculate cosine similarity
-                sim = F.cosine_similarity(student_emb, teacher_emb_batch, dim=-1)
+                sim = F.cosine_similarity(student_emb, batch["teacher_embeddings"], dim=-1)
                 eval_cosine_sims.extend(sim.cpu().numpy())
 
         avg_train_loss = np.mean(train_losses)
         avg_eval_loss = np.mean(eval_losses)
         avg_eval_cosine_sim = np.mean(eval_cosine_sims)
         
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Eval Loss: {avg_eval_loss:.4f}")
-        print(f"Eval Cosine Similarity: {avg_eval_cosine_sim:.4f}")
+        print(f"Train Loss: {avg_train_loss:.4f} | Eval Loss: {avg_eval_loss:.4f} | Eval Cosine Sim: {avg_eval_cosine_sim:.4f}")
         
         if use_wandb:
             wandb.log({
-                "train/epoch_loss": avg_train_loss,
-                "eval/epoch_loss": avg_eval_loss,
-                "eval/cosine_similarity": avg_eval_cosine_sim,
-                "epoch": epoch
+                "train/epoch_loss": avg_train_loss, "eval/epoch_loss": avg_eval_loss,
+                "eval/cosine_similarity": avg_eval_cosine_sim, "epoch": epoch
             }, step=global_step)
         
         # Save best model
         if avg_eval_loss < best_eval_loss:
             best_eval_loss = avg_eval_loss
-            model.save_pretrained(output_dir / "best_model")
+            # Handle compiled model saving
+            save_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+            save_model.save_pretrained(output_dir / "best_model")
             print(f"Saved best model (eval_loss: {best_eval_loss:.4f})")
     
     # Save final model
-    model.save_pretrained(output_dir / "final_model")
+    save_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+    save_model.save_pretrained(output_dir / "final_model")
     print(f"\nTraining complete! Final model saved to {output_dir / 'final_model'}")
     
     if use_wandb:
