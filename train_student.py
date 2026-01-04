@@ -11,7 +11,7 @@ from distilled_tx1.training.distillation import train_distilled_model
 from distilled_tx1.data.load_h5ad_folder import load_h5ad_folder_lazy
 
 # %%
-ref_adata = sc.read_h5ad("data_yuto_with_clusters_chunk_001.h5ad")
+ref_adata = sc.read_h5ad("/data/scClassificationDatasets/data_yuto/tahoe_x1_embeddings/70m/data_yuto_with_clusters_chunk_001.h5ad")
 
 # %%
 
@@ -22,7 +22,7 @@ teacher_embeddings = np.array([])
 config = PreprocessingConfig(
         seq_len=512,
         n_bins=51,
-        normalize=False,
+        normalize=True,
         target_sum=1e4,
         gene_sampling_strategy="topk",
         add_cls_token=True,
@@ -41,7 +41,7 @@ expression_bins = np.array([])
 attention_masks = np.array([])
 
 # %%
-for h5ad_file in tqdm(Path("70m").glob("*.h5ad")):
+for h5ad_file in tqdm(Path("/data/scClassificationDatasets/data_yuto/tahoe_x1_embeddings/70m").glob("*.h5ad")):
     adata = sc.read_h5ad(h5ad_file)
     adata.var['gene_id'] = ref_adata.var['gene_id']
     
@@ -104,6 +104,7 @@ try:
             eval_split=0.1,
             use_wandb=True,  # Optional: log to W&B
             wandb_project="distilled-tahoe-x1",
+            cosine_loss_weight=1.0,
         )
 except Exception as e:
     print(e)
