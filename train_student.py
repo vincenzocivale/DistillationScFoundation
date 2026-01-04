@@ -42,7 +42,7 @@ expression_bins = np.array([])
 attention_masks = np.array([])
 
 # %%
-for h5ad_file in tqdm(Path("/data/scClassificationDatasets/data_yuto/tahoe_x1_embeddings/70m").glob("*.h5ad")):
+for h5ad_file in tqdm(Path("70m").glob("*.h5ad")):
     adata = sc.read_h5ad(h5ad_file)
 
     adata.var['gene_id'] = ref_adata.var['gene_id'].astype(str)
